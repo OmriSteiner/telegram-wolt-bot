@@ -46,6 +46,7 @@ def monitor_restaurant(update, context, index):
         except KeyError:
             context.bot.send_message(chat_id=update.effective_chat.id,
                                      text=f'Could not fetch online status. Aborting monitor.')
+            context.job.schedule_removal()
             return
 
         if is_online:
