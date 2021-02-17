@@ -78,7 +78,8 @@ def monitor_restaurant(update, context, index):
     def repeating_job(context):
         result = requests.get(RESTAURANT_INFO_URL + restaurant['slug']).json()
         try:
-            is_online = result['results'][0]['online']
+            r = result['results'][0]
+            is_online = r['online'] and r['delivery_specs']['delivery_enabled']
         except KeyError:
             context.bot.send_message(chat_id=update.effective_chat.id,
                                      text=f'Could not fetch online status. Aborting monitor.')
