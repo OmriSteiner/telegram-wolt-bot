@@ -2,7 +2,7 @@
 # -*- coding: future_fstrings -*-
 
 import logging
-
+import argparse
 import requests
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
@@ -149,11 +149,13 @@ def start(update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text=START_MESSAGE)
 
 
-def setup_logging():
-    logging.basicConfig(level=logging.INFO)
+def setup_logging(filename=None):
+    logging.basicConfig(filename=filename, level=logging.INFO)
 
 
-def main():
+def main(args):
+    setup_logging(args.log_path)
+
     updater = Updater(token=config.TOKEN, use_context=True)
     dispatcher = updater.dispatcher
 
@@ -170,6 +172,13 @@ def main():
     updater.start_polling()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-o", dest="log_path", help="Path to a log file. If provided, will log to this file instead of STDOUT.")
+
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    setup_logging()
-    main()
+    args = parse_args()
+    main(args)
