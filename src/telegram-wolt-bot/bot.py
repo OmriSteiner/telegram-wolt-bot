@@ -1,17 +1,13 @@
 #! /usr/bin/env python3
-# -*- coding: future_fstrings -*-
 
 import logging
 import argparse
 import requests
+import collections
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 import config
-
-WOLT_DOMAIN = 'restaurant-api.wolt.com'
-WOLT_URL = f'https://{WOLT_DOMAIN}'
-SEARCH_URL = f'{WOLT_URL}/v1/pages/search'
-RESTAURANT_INFO_URL = f'{WOLT_URL}/v3/venues/slug/'
+from woltapi import WoltAPI
 
 START_MESSAGE = """Hello!
 In order to wait for a restaurant to become online, type:
@@ -22,34 +18,60 @@ The restaurant's name could be in Hebrew or English!"""
 MONITORING_JOBS_KEY = "monitoring"
 MONITOR_INTERVAL = 10 # every 10sec
 
+class MonitorRequest(object):
+    REQUEST_KEY = "monitor_request"
 
-def lookup_restaurant(name):
-    params = {
-        "q": name,
-        # Since 25.11.2021, Wolt's backend requires your location for searchs.
-        # So heres Dizengoff Center for you...
-        "lat": 32.075409,
-        "lon": 34.775134
-    }
-    result = requests.get(SEARCH_URL, params=params).json()
-    # Result always has a single section.
-    section = result["sections"][0]
+    def __init__(self, context, chat_id, restaurant_name):
+        self._restaurant_name = restaurant_name
+        self._search_results = []
+        self._context = context
+        self._chat_id = chat_id
 
-    if section["name"] == "no-content":
-        # This means there are no search results
-        return []
+    def process_request(self):
+        self._search_results = WoltAPI.lookup_restaurant(self._restaurant_name)
+        self._handle_lookup_results()
 
-    restaurants = []
-    for restaurant in section["items"]:
-        restaurants.append({"name": restaurant["title"], "slug": restaurant["venue"]["slug"]})
-    return restaurants
+    def _handle_lookup_results(self):
+        if len(self._search_results) == 0:
+            self.send_message('No restaurant found.')
+        elif len(self._search_results) == 1:
+            # Single result found, just monitor it.
+            monitor_restaurant(self._chat_id, self._context, self._search_results[0])
+        else:
+            # more than one result found, let user pick
+            response = 'More than one result found, pick one:\n'
+            for index, restaurant in enumerate(self._search_results):
+                response += f'[{index}]: {restaurant.name}\n'
+            self._send_message(text=response)
+
+            # Register self as the current MonitorRequest for this chat
+            self._context.chat_data[self.REQUEST_KEY] = self
+
+
+    def _send_message(self, text):
+        return self._context.bot.send_message(chat_id=self._chat_id, text=text)
+
+    def select_restaurant(self, index):
+        if len(self._search_results) < index:
+            self._send_message(
+                f'Invalid index: {index}, max index is {len(self._search_results)-1}')
+            return
+
+        # A restaurant was chosen, remove myself from the chat context.
+        self._context.chat_data.pop(self.REQUEST_KEY)
+
+        return self._search_results[index]
+
+    @classmethod
+    def from_context(cls, context):
+        return context.chat_data.get(cls.REQUEST_KEY)
 
 
 def add_monitoring_job(context, repeating_callback, restaurant_name):
     job = context.job_queue.run_repeating(repeating_callback, MONITOR_INTERVAL) # every 10sec
 
     monitoring_jobs = context.bot_data.setdefault(MONITORING_JOBS_KEY, {})
-    monitoring_jobs[job] = restaurant_name
+    monitoring_jobs[job.id] = restaurant_name
 
 
 def remove_monitoring_job(context):
@@ -58,7 +80,7 @@ def remove_monitoring_job(context):
         return
 
     try:
-        context.bot_data[MONITORING_JOBS_KEY].pop(job)
+        context.bot_data[MONITORING_JOBS_KEY].pop(job.id)
     except KeyError:
         logging.error("Tried removing job but failed.")
 
@@ -72,43 +94,34 @@ def get_monitored_restaurants(context):
         return []
 
 
-def monitor_restaurant(update, context, index):
-    options = context.chat_data['restaurant_options']
-    if len(options) <= index:
-        context.bot.send_message(chat_id=update.effective_chat.id,
-                                 text=f'Invalid index: {index}, max index is {len(options)-1}')
-        return
-
-    restaurant = options[index]
-    context.bot.send_message(chat_id=update.effective_chat.id,
-                             text=f'Starting to monitor "{restaurant["name"]}"')
-
-    del context.chat_data['restaurant_options']
+def monitor_restaurant(chat_id, context, restaurant):
+    context.bot.send_message(chat_id=chat_id,
+                             text=f'Starting to monitor "{restaurant.name}"')
 
     def repeating_job(context):
-        result = requests.get(RESTAURANT_INFO_URL + restaurant['slug']).json()
+        result = requests.get(restaurant.info_url).json()
         try:
             r = result['results'][0]
             is_online = r['online'] and r['delivery_specs']['delivery_enabled']
         except KeyError:
-            context.bot.send_message(chat_id=update.effective_chat.id,
+            context.bot.send_message(chat_id=chat_id,
                                      text=f'Could not fetch online status. Aborting monitor.')
             remove_monitoring_job(context)
             return
 
         if is_online:
-            context.bot.send_message(chat_id=update.effective_chat.id,
-                                     text=f'Restaurant "{restaurant["name"]}" is online!')
+            context.bot.send_message(chat_id=chat_id,
+                                     text=f'Restaurant "{restaurant.name}" is online!')
             # Don't run anymore
             remove_monitoring_job(context)
 
 
-    add_monitoring_job(context, repeating_job, restaurant["name"])
+    add_monitoring_job(context, repeating_job, restaurant.name)
 
 
 def message_callback(update, context):
-    options = context.chat_data.get('restaurant_options')
-    if options == None:
+    monitor_request = MonitorRequest.from_context(context)
+    if monitor_request == None:
         return
 
     try:
@@ -116,27 +129,16 @@ def message_callback(update, context):
     except ValueError:
         return
 
-    monitor_restaurant(update, context, index)
+    restaurant = monitor_request.select_restaurant(index)
+
+    monitor_restaurant(update.effective_chat.id, context, restaurant)
 
 
 def monitor(update, context):
-    name = ' '.join(context.args)
-    results = lookup_restaurant(name)
+    restaurant_name = ' '.join(context.args)
 
-    context.chat_data['restaurant_options'] = results
-
-    if len(results) == 0:
-        context.bot.send_message(chat_id=update.effective_chat.id, text='No restaurant found.')
-        del context.chat_data['restaurant_options']
-    elif len(results) > 1:
-        # more than one result found, let user pick
-        response = 'More than one result found, pick one:\n'
-        for index, restaurant in enumerate(results):
-            response += f'[{index}]: {restaurant["name"]}\n'
-        context.bot.send_message(chat_id=update.effective_chat.id, text=response)
-    else:
-        # Single result found, just monitor it.
-        monitor_restaurant(update, context, 0)
+    monitor_request = MonitorRequest(context, update.effective_chat.id, restaurant_name)
+    monitor_request.process_request()
 
 
 def status(update, context):
@@ -170,6 +172,7 @@ def main(args):
     dispatcher.add_handler(message_handler)
 
     updater.start_polling()
+    updater.idle()
 
 
 def parse_args():
