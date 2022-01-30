@@ -14,8 +14,11 @@ class Restaurant:
 
     @property
     def info_url(self):
-    	return RESTAURANT_INFO_URL + self.slug
+        return RESTAURANT_INFO_URL + self.slug
 
+
+class WoltAPIException(Exception):
+    pass
 
 class WoltAPI(object):
     @staticmethod
@@ -39,3 +42,14 @@ class WoltAPI(object):
         for restaurant in section["items"]:
             restaurants.append(Restaurant(name=restaurant["title"], slug=restaurant["venue"]["slug"]))
         return restaurants
+
+
+    @staticmethod
+    def is_restaurant_online(restaurant):
+        result = requests.get(restaurant.info_url).json()
+        try:
+            r = result['results'][0]
+            is_online = r['online'] and r['delivery_specs']['delivery_enabled']
+            return is_online
+        except KeyError as e:
+            raise WoltAPIException("Wolt API returned invalid response.") from e
