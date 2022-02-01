@@ -37,21 +37,39 @@ class RestaurantContext(object):
         return self._subscribed_chats
 
 
-class BotContext(object):
+@dataclass
+class ChatContext:
+    search_results: list[str]
+
+
+class WoltBot(object):
     MONITOR_INTERVAL_RANGE_SEC = (10, 20) # 10 to 20 secs
 
     def __init__(self, bot):
-        self.monitored_restaurants = {}
+        self._monitored_restaurants = {}
+        self._chat_contexts = {}
         self._bot = bot
 
+    def start(self, updater):
+        handlers = [
+            CommandHandler('monitor', self.monitor_handler),
+            CommandHandler('start', self.start_handler),
+            CommandHandler('status', self.status_handler),
+            MessageHandler(Filters.text & (~Filters.command), self.message_handler),
+        ]
+        for handler in handlers:
+            updater.dispatcher.add_handler(handler)
+
+        self._schedule_monitor_job(updater.job_queue)
+
     def get_monitored_restaurants(self):
-        return list(self.monitored_restaurants.keys())
+        return list(self._monitored_restaurants.keys())
 
     def monitor_restaurant(self, restaurant, chat_id):
         """
         Start monitoring a restaurant, when it is online, `chat_id` will be notified.
         """
-        restaurant_context = self.monitored_restaurants.setdefault(restaurant, RestaurantContext())
+        restaurant_context = self._monitored_restaurants.setdefault(restaurant, RestaurantContext())
         restaurant_context.add_chat(chat_id)
 
         self._bot.send_message(chat_id=chat_id,
@@ -60,7 +78,7 @@ class BotContext(object):
     def _monitor_restaurants(self, context):
         done = []
 
-        for restaurant, restaurant_context in self.monitored_restaurants.items():
+        for restaurant, restaurant_context in self._monitored_restaurants.items():
             try:
                 if not WoltAPI.is_restaurant_online(restaurant):
                     continue
@@ -86,111 +104,73 @@ class BotContext(object):
                 # TODO: statistics here
 
         for restaurant in done:
-            self.monitored_restaurants.pop(restaurant)
+            self._monitored_restaurants.pop(restaurant)
 
-    @classmethod
-    def monitor_restaurants_job(cls, context):
+    def _monitor_restaurants_job(self, context):
         """
         This callback is called by the bot's event loop.
         When done running, it schedules itself for another run after a random interval.
         """
-        bot_context = cls.from_context(context)
-        bot_context._monitor_restaurants(context)
+        self._monitor_restaurants(context)
+        self._schedule_monitor_job(context.job_queue)
 
-        cls.schedule_monitor_job(context.job_queue)
+    def _schedule_monitor_job(self, job_queue):
+        interval = random.randrange(*self.MONITOR_INTERVAL_RANGE_SEC)
+        # We use run_once in order to run at random intervals.
+        job_queue.run_once(self._monitor_restaurants_job, interval)
 
-    @classmethod
-    def schedule_monitor_job(cls, job_queue):
-        interval = random.randrange(*cls.MONITOR_INTERVAL_RANGE_SEC)
-        job_queue.run_once(cls.monitor_restaurants_job, interval)
-
-    @classmethod
-    def from_context(cls, context):
-        return context.bot_data.setdefault("bot_context", cls(context.bot))
-
-
-class MonitorRequest(object):
-    REQUEST_KEY = "monitor_request"
-
-    def __init__(self, context, chat_id, restaurant_name):
-        self._restaurant_name = restaurant_name
-        self._search_results = []
-        self._context = context
-        self._chat_id = chat_id
-
-    def process_request(self):
-        self._search_results = WoltAPI.lookup_restaurant(self._restaurant_name)
-        self._handle_lookup_results()
-
-    def _handle_lookup_results(self):
-        if len(self._search_results) == 0:
-            self.send_message('No restaurant found.')
-        elif len(self._search_results) == 1:
-            # Single result found, just monitor it.
-            bot_context = BotContext.from_context(self._context)
-            bot_context.monitor_restaurant(self._search_results[0], self._chat_id)
-        else:
-            # more than one result found, let user pick
-            response = 'More than one result found, pick one:\n'
-            for index, restaurant in enumerate(self._search_results):
-                response += f'[{index}]: {restaurant.name}\n'
-            self._send_message(text=response)
-
-            # Register self as the current MonitorRequest for this chat
-            self._context.chat_data[self.REQUEST_KEY] = self
-
-    def _send_message(self, text):
-        return self._context.bot.send_message(chat_id=self._chat_id, text=text)
-
-    def select_restaurant(self, index):
-        if len(self._search_results) < index:
-            self._send_message(
-                f'Invalid index: {index}, max index is {len(self._search_results)-1}')
+    def message_handler(self, update, context):
+        chat_id = update.effective_chat.id
+        chat_context = self._chat_contexts.get(chat_id)
+        if chat_context == None:
             return
 
-        # A restaurant was chosen, remove myself from the chat context.
-        self._context.chat_data.pop(self.REQUEST_KEY)
+        try:
+            index = int(update.message.text)
+        except ValueError:
+            return
 
-        return self._search_results[index]
+        if len(chat_context.search_results) < index:
+            self._send_message(
+                f'Invalid index: {index}, max index is {len(chat_context.search_results)-1}')
+            return
 
-    @classmethod
-    def from_context(cls, context):
-        return context.chat_data.get(cls.REQUEST_KEY)
+        restaurant = chat_context.search_results[index]
 
+        self._chat_contexts.pop(chat_id)
 
-def message_callback(update, context):
-    monitor_request = MonitorRequest.from_context(context)
-    if monitor_request == None:
-        return
+        self.monitor_restaurant(restaurant, chat_id)
 
-    try:
-        index = int(update.message.text)
-    except ValueError:
-        return
+    def monitor_handler(self, update, context):
+        restaurant_name = ' '.join(context.args)
 
-    restaurant = monitor_request.select_restaurant(index)
+        chat_id = update.effective_chat.id
+        results = WoltAPI.lookup_restaurant(restaurant_name)
 
-    bot_context = BotContext.from_context(context)
-    bot_context.monitor_restaurant(restaurant, update.effective_chat.id)
+        send_message = lambda text: context.bot.send_message(chat_id=chat_id, text=text)
 
+        if len(results) == 0:
+            send_message("No restaurant found.")
+        elif len(results) == 1:
+            # Single result found, just monitor it.
+            self.monitor_restaurant(results[0], chat_id)
+        else:
+            # more than one result found, let user pick
+            response = "More than one result found, pick one:\n"
+            for index, restaurant in enumerate(results):
+                response += f'[{index}]: {restaurant.name}\n'
+            send_message(response)
 
-def monitor(update, context):
-    restaurant_name = ' '.join(context.args)
+            self._chat_contexts[chat_id] = ChatContext(results)
 
-    monitor_request = MonitorRequest(context, update.effective_chat.id, restaurant_name)
-    monitor_request.process_request()
+    def status_handler(self, update, context):
+        restaurants = self.get_monitored_restaurants()
+        restaurant_names = [r.name for r in restaurants]
+        context.bot.send_message(chat_id=update.effective_chat.id,
+                                 text=str(restaurant_names))
 
-
-def status(update, context):
-    bot_context = BotContext.from_context(context)
-    restaurants = bot_context.get_monitored_restaurants()
-    restaurant_names = [r.name for r in restaurants]
-    context.bot.send_message(chat_id=update.effective_chat.id,
-                             text=str(restaurant_names))
-
-
-def start(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text=START_MESSAGE)
+    def start_handler(self, update, context):
+        context.bot.send_message(chat_id=update.effective_chat.id, text=START_MESSAGE)
 
 
 def setup_logging(filename=None):
@@ -201,19 +181,9 @@ def main(args):
     setup_logging(args.log_path)
 
     updater = Updater(token=config.TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
 
-    monitor_handler = CommandHandler('monitor', monitor)
-    start_handler = CommandHandler('start', start)
-    status_handler = CommandHandler('status', status)
-    message_handler = MessageHandler(Filters.text & (~Filters.command), message_callback)
-
-    dispatcher.add_handler(monitor_handler)
-    dispatcher.add_handler(start_handler)
-    dispatcher.add_handler(status_handler)
-    dispatcher.add_handler(message_handler)
-
-    BotContext.schedule_monitor_job(updater.job_queue)
+    bot = WoltBot(updater.bot)
+    bot.start(updater)
 
     updater.start_polling()
     updater.idle()
