@@ -20,21 +20,21 @@ The restaurant's name could be in Hebrew or English!"""
 
 
 @dataclass(frozen=True)
-class ChatMonitorInfo:
-    id: int
+class MonitorRequest:
+    chat_id: int
     start_time: float = field(compare=False, default_factory=time.time)
 
 
 class RestaurantContext(object):
     def __init__(self):
-        self._subscribed_chats = set()
+        self._monitor_requests = set()
 
     def add_chat(self, chat_id):
-        self._subscribed_chats.add(ChatMonitorInfo(id=chat_id))
+        self._monitor_requests.add(MonitorRequest(chat_id=chat_id))
 
     @property
-    def subscribed_chats(self):
-        return self._subscribed_chats
+    def monitor_requests(self):
+        return self._monitor_requests
 
 
 @dataclass
@@ -87,8 +87,8 @@ class WoltBot(object):
                 done.append(restaurant)
 
                 # Notify all chats an error occured.
-                for chat in restaurant_context.subscribed_chats:
-                    context.bot.send_message(chat_id=chat.id,
+                for monitor_request in restaurant_context.monitor_requests:
+                    context.bot.send_message(chat_id=monitor_request.chat_id,
                                              text=f'Could not fetch online status. Aborting monitor.')
                 continue
 
@@ -96,9 +96,9 @@ class WoltBot(object):
             done.append(restaurant)
 
             # Notify all subscribed chats.
-            for chat in restaurant_context.subscribed_chats:
+            for monitor_request in restaurant_context.monitor_requests:
                 context.bot.send_message(
-                    chat_id=chat.id,
+                    chat_id=monitor_request.chat_id,
                     text=f'Restaurant "{restaurant.name}" is online!')
 
                 # TODO: statistics here
