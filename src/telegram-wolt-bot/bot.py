@@ -6,7 +6,7 @@ import requests
 import collections
 import time
 import random
-from dataclasses import dataclass, field
+import dataclasses
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 import config
@@ -19,10 +19,10 @@ In order to wait for a restaurant to become online, type:
 The restaurant's name could be in Hebrew or English!"""
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class MonitorRequest:
     chat_id: int
-    start_time: float = field(compare=False, default_factory=time.time)
+    start_time: float = dataclasses.field(compare=False, default_factory=time.time)
 
 
 class RestaurantContext(object):
@@ -37,7 +37,7 @@ class RestaurantContext(object):
         return self._monitor_requests
 
 
-@dataclass
+@dataclasses.dataclass
 class ChatContext:
     search_results: list[str]
 
