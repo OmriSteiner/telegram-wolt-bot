@@ -9,7 +9,6 @@ import random
 import dataclasses
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
-import config
 from woltapi import WoltAPI, WoltAPIException
 
 START_MESSAGE = """Hello!
@@ -180,7 +179,7 @@ def setup_logging(filename=None):
 def main(args):
     setup_logging(args.log_path)
 
-    updater = Updater(token=config.TOKEN, use_context=True)
+    updater = Updater(token=args.token, use_context=True)
 
     bot = WoltBot(updater.bot)
     bot.start(updater)
@@ -192,6 +191,7 @@ def main(args):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-o", dest="log_path", help="Path to a log file. If provided, will log to this file instead of STDOUT.")
+    parser.add_argument("-t", "token", dest="token", help="Telegram bot token.", required=True)
 
     return parser.parse_args()
 
