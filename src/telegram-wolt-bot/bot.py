@@ -7,6 +7,8 @@ import collections
 import time
 import random
 import dataclasses
+import json
+
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 from woltapi import WoltAPI, WoltAPIException
@@ -176,10 +178,19 @@ def setup_logging(filename=None):
     logging.basicConfig(filename=filename, level=logging.INFO)
 
 
+def get_token(tokenfile):
+    with open(tokenfile, "r") as f:
+        j = json.load(f)
+
+    return j["token"]
+
+
 def main(args):
     setup_logging(args.log_path)
 
-    updater = Updater(token=args.token, use_context=True)
+    token = get_token(args.tokenfile)
+
+    updater = Updater(token=token, use_context=True)
 
     bot = WoltBot(updater.bot)
     bot.start(updater)
@@ -190,8 +201,8 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("tokenfile", help="File containing the Telegram bot token")
     parser.add_argument("-o", dest="log_path", help="Path to a log file. If provided, will log to this file instead of STDOUT.")
-    parser.add_argument("-t", "token", dest="token", help="Telegram bot token.", required=True)
 
     return parser.parse_args()
 
