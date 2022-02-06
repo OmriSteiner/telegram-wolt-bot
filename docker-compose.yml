@@ -1,0 +1,19 @@
+version: "3.9"
+services:
+  postgresql:
+    image: postgres:14.1
+    restart: always
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+
+  woltbot:
+    build: .
+    volumes:
+      - ./token.json:/telegram-wolt-bot/token.json
+    depends_on:
+      - postgresql
+
+volumes:
+  db-data:
