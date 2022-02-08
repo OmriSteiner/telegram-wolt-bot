@@ -4,14 +4,16 @@ import logging
 import argparse
 import requests
 import collections
-import time
 import random
 import dataclasses
+import datetime
 import json
 
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+import psycopg2.pool
 
 from woltapi import WoltAPI, WoltAPIException
+from statistics import PostgresStats, MonitorEvent
 
 START_MESSAGE = """Hello!
 In order to wait for a restaurant to become online, type:
@@ -23,7 +25,7 @@ The restaurant's name could be in Hebrew or English!"""
 @dataclasses.dataclass(frozen=True)
 class MonitorRequest:
     chat_id: int
-    start_time: float = dataclasses.field(compare=False, default_factory=time.time)
+    start_time: datetime.datetime = dataclasses.field(compare=False, default_factory=datetime.datetime.now)
 
 
 class RestaurantContext(object):
@@ -46,16 +48,18 @@ class ChatContext:
 class WoltBot(object):
     MONITOR_INTERVAL_RANGE_SEC = (10, 20) # 10 to 20 secs
 
-    def __init__(self, bot):
+    def __init__(self, bot, stats=None):
         self._monitored_restaurants = {}
         self._chat_contexts = {}
         self._bot = bot
+        self._stats = stats
 
     def start(self, updater):
         handlers = [
             CommandHandler('monitor', self.monitor_handler),
             CommandHandler('start', self.start_handler),
             CommandHandler('status', self.status_handler),
+            CommandHandler('stats', self.stats_handler),
             MessageHandler(Filters.text & (~Filters.command), self.message_handler),
         ]
         for handler in handlers:
@@ -73,19 +77,44 @@ class WoltBot(object):
         restaurant_context = self._monitored_restaurants.setdefault(restaurant, RestaurantContext())
         restaurant_context.add_chat(chat_id)
 
+        message = f'Starting to monitor "{restaurant.name}"'
+        if self._stats != None:
+            if restaurant_stats := self._stats.get_restaurant_stats(restaurant.name):
+                message += f' - average waiting time is {restaurant_stats.average_wait_time}.'
+
         self._bot.send_message(chat_id=chat_id,
-                               text=f'Starting to monitor "{restaurant.name}"')
+                               text=message)
+
+    def _stop_monitoring_restaurant(self, restaurant, success):
+        try:
+            restaurant_context = self._monitored_restaurants.pop(restaurant)
+        except KeyError:
+            logging.error(f"Tried to stop monitoring {restaurant.name} - but it wasn't being monitored.")
+            return
+
+        if self._stats == None:
+            return
+
+        end_time = datetime.datetime.now()
+        events = []
+        for i in restaurant_context.monitor_requests:
+            events.append(MonitorEvent(i.chat_id, i.start_time, end_time, restaurant.name, success))
+
+        self._stats.report_monitor_events(events)
+
+    def _did_restaurant_timeout(self, restaurant_context, timeout=datetime.timedelta(hours=2)):
+        earliest_start_time = min((r.start_time for r in restaurant_context.monitor_requests))
+        return datetime.datetime.now() - earliest_start_time > timeout
 
     def _monitor_restaurants(self, context):
         done = []
 
         for restaurant, restaurant_context in self._monitored_restaurants.items():
             try:
-                if not WoltAPI.is_restaurant_online(restaurant):
-                    continue
+                is_online = WoltAPI.is_restaurant_online(restaurant)
             except WoltAPIException:
                 # Stop monitoring this restaurant, as an error occured.
-                done.append(restaurant)
+                done.append((restaurant, False))
 
                 # Notify all chats an error occured.
                 for monitor_request in restaurant_context.monitor_requests:
@@ -93,19 +122,29 @@ class WoltBot(object):
                                              text=f'Could not fetch online status. Aborting monitor.')
                 continue
 
-            # Restaurant is online, stop monitoring.
-            done.append(restaurant)
+            if is_online:
+                # Restaurant is online, stop monitoring.
+                done.append((restaurant, True))
 
-            # Notify all subscribed chats.
-            for monitor_request in restaurant_context.monitor_requests:
-                context.bot.send_message(
-                    chat_id=monitor_request.chat_id,
-                    text=f'Restaurant "{restaurant.name}" is online!')
+                # Notify all subscribed chats.
+                for monitor_request in restaurant_context.monitor_requests:
+                    context.bot.send_message(
+                        chat_id=monitor_request.chat_id,
+                        text=f'Restaurant "{restaurant.name}" is online!')
+            elif self._did_restaurant_timeout(restaurant_context):
+                done.append((restaurant, False))
 
-                # TODO: statistics here
+                message = f'Stopped monitoring restaurant "{restaurant.name}" ' \
+                           'because I was waiting for a long while ' \
+                           '(Someone else might have been waiting on this restaurant before you).\n' \
+                           'You can start monitoring again if relevant.'
+                for monitor_request in restaurant_context.monitor_requests:
+                    context.bot.send_message(
+                        chat_id=monitor_request.chat_id,
+                        text=message)
 
-        for restaurant in done:
-            self._monitored_restaurants.pop(restaurant)
+        for restaurant, success in done:
+            self._stop_monitoring_restaurant(restaurant, success)
 
     def _monitor_restaurants_job(self, context):
         """
@@ -170,12 +209,34 @@ class WoltBot(object):
         context.bot.send_message(chat_id=update.effective_chat.id,
                                  text=str(restaurant_names))
 
+    def stats_handler(self, update, context):
+        chat_id = update.effective_chat.id
+        if self._stats == None:
+            context.bot.send_message(chat_id=chat_id,
+                                     text="Statistics are not available.")
+            return
+
+        if stats := self._stats.get_general_stats():
+            response = stats.pretty_print()
+        else:
+            response = "No stats available."
+
+        context.bot.send_message(chat_id=chat_id, text=response)
+
     def start_handler(self, update, context):
         context.bot.send_message(chat_id=update.effective_chat.id, text=START_MESSAGE)
 
 
 def setup_logging(filename=None):
     logging.basicConfig(filename=filename, level=logging.INFO)
+
+
+def setup_stats(args):
+    if args.db_host == None:
+        return None
+    else:
+        pool = psycopg2.pool.SimpleConnectionPool(1, 1, host=args.db_host, user=args.db_user, dbname=args.db_name)
+        return PostgresStats(pool, args.table_name)
 
 
 def get_token(tokenfile):
@@ -192,7 +253,10 @@ def main(args):
 
     updater = Updater(token=token, use_context=True)
 
-    bot = WoltBot(updater.bot)
+    if stats := setup_stats(args):
+        stats.setup()
+
+    bot = WoltBot(updater.bot, stats)
     bot.start(updater)
 
     updater.start_polling()
@@ -203,6 +267,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("tokenfile", help="File containing the Telegram bot token")
     parser.add_argument("-o", dest="log_path", help="Path to a log file. If provided, will log to this file instead of STDOUT.")
+
+    db_group = parser.add_argument_group("postgres")
+    db_group.add_argument("-i", "--db-host", dest="db_host", help="PostgreSQL host")
+    db_group.add_argument("-U", "--db-user", dest="db_user", help="PostgreSQL user", default="postgres")
+    db_group.add_argument("-d", "--db-name", dest="db_name", help="PostgreSQL database name", default="")
+    db_group.add_argument("--table-name", dest="table_name", help="SQL table name to store stats in", default="monitor_requests")
 
     return parser.parse_args()
 
