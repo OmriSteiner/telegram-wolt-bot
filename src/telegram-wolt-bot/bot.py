@@ -8,6 +8,8 @@ import random
 import dataclasses
 import datetime
 import json
+import os
+import traceback
 
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 import psycopg2.pool
@@ -121,6 +123,9 @@ class WoltBot(object):
                     context.bot.send_message(chat_id=monitor_request.chat_id,
                                              text=f'Could not fetch online status. Aborting monitor.')
                 continue
+            except:
+                logging.error(f"Error when querying WoltAPI, exiting...\n{traceback.format_exc()}")
+                os._exit(1)
 
             if is_online:
                 # Restaurant is online, stop monitoring.
