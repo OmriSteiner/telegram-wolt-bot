@@ -190,9 +190,13 @@ class WoltBot(object):
         restaurant_name = ' '.join(context.args)
 
         chat_id = update.effective_chat.id
-        results = WoltAPI.lookup_restaurant(restaurant_name)
-
         send_message = lambda text: context.bot.send_message(chat_id=chat_id, text=text)
+
+        try:
+            results = WoltAPI.lookup_restaurant(restaurant_name)
+        except WoltAPIException:
+            send_message("Failed to search for a restaurant because of Wolt failure. You can try again.")
+            return
 
         if len(results) == 0:
             send_message("No restaurant found.")

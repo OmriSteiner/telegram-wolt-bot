@@ -31,8 +31,14 @@ class WoltAPI(object):
             "lon": 34.775134
         }
         result = requests.get(SEARCH_URL, params=params).json()
+        try:
+            # Sometimes the "sections" key is missing, don't know why.
+            sections = result["sections"]
+        except KeyError as e:
+            raise WoltAPIException('"sections" key is missing from Wolt API response.') from e
+
         # Result always has a single section.
-        section = result["sections"][0]
+        section = sections[0]
 
         if section["name"] == "no-content":
             # This means there are no search results
