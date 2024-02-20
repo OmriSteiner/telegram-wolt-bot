@@ -30,7 +30,7 @@ class WoltAPI(object):
             "lat": 32.075409,
             "lon": 34.775134
         }
-        result = requests.get(SEARCH_URL, params=params).json()
+        result = requests.post(SEARCH_URL, json=params).json()
         try:
             # Sometimes the "sections" key is missing, don't know why.
             sections = result["sections"]
